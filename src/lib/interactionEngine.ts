@@ -37,49 +37,41 @@ export async function checkInteractions(
 ): Promise<Finding[]> {
   if (medications.length < 2) return [];
 
-  // Create all unique medication pairs.
-  const pairs: [string, string][] = [];
-
-  for (let i = 0; i < medications.length; i++) {
-    for (let j = i + 1; j < medications.length; j++) {
-      pairs.push([medications[i], medications[j]]);
-    }
-  }
-
-  // Load the interaction reference data.
-  // We intentionally avoid .or() and has_interaction filtering here.
+  // Get only combinations where both drugs are among the
+  // medications selected by the user.
   const { data, error } = await supabase
     .from('drug_combinations')
     .select(
       'drug_a, drug_b, severity, interaction, mechanism, possible_effect, project_action'
-    );
+    )
+    .in('drug_a', medications)
+    .in('drug_b', medications)
+    .eq('has_interaction', true);
 
   if (error) {
-    console.error('Interaction database error:', error);
+    console.error('Interaction query failed:', error);
     throw new Error(error.message);
   }
 
   if (!data) return [];
 
-  const findings: Finding[] = [];
+  const selectedPairs = new Set(
+    medications.flatMap((a, i) =>
+      medications.slice(i + 1).map(
+        (b) => [a, b].sort().join(' + ')
+      )
+    )
+  );
+
   const seen = new Set<string>();
+  const findings: Finding[] = [];
 
-  // Match selected medication pairs against the reference dataset.
-  for (const [medA, medB] of pairs) {
-    const row = (data as ComboRow[]).find(
-      (item) =>
-        (item.drug_a.toLowerCase() === medA.toLowerCase() &&
-          item.drug_b.toLowerCase() === medB.toLowerCase()) ||
-        (item.drug_a.toLowerCase() === medB.toLowerCase() &&
-          item.drug_b.toLowerCase() === medA.toLowerCase())
-    );
-
-    if (!row) continue;
-
+  for (const row of data as ComboRow[]) {
     const key = [row.drug_a, row.drug_b]
       .sort()
       .join(' + ');
 
+    if (!selectedPairs.has(key)) continue;
     if (seen.has(key)) continue;
 
     seen.add(key);
@@ -99,7 +91,6 @@ export async function checkInteractions(
     });
   }
 
-  // Highest risk first.
   findings.sort((a, b) => {
     const order: Record<Risk, number> = {
       High: 0,
