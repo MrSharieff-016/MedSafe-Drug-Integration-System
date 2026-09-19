@@ -32,38 +32,60 @@ type ComboRow = {
   project_action: string | null;
 };
 
-export async function checkInteractions(medications: string[]): Promise<Finding[]> {
+export async function checkInteractions(
+  medications: string[]
+): Promise<Finding[]> {
   if (medications.length < 2) return [];
+
+  // Create all unique medication pairs.
   const pairs: [string, string][] = [];
+
   for (let i = 0; i < medications.length; i++) {
     for (let j = i + 1; j < medications.length; j++) {
       pairs.push([medications[i], medications[j]]);
     }
   }
 
-  const orFilters = pairs
-    .map(
-      ([a, b]) =>
-        `(drug_a.eq.${a},drug_b.eq.${b}),(drug_a.eq.${b},drug_b.eq.${a})`
-    )
-    .join(',');
-
+  // Load the interaction reference data.
+  // We intentionally avoid .or() and has_interaction filtering here.
   const { data, error } = await supabase
     .from('drug_combinations')
-    .select('drug_a, drug_b, severity, interaction, mechanism, possible_effect, project_action')
-    .or(orFilters)
-    .eq('has_interaction', true);
+    .select(
+      'drug_a, drug_b, severity, interaction, mechanism, possible_effect, project_action'
+    );
 
-  if (error) throw error;
+  if (error) {
+    console.error('Interaction database error:', error);
+    throw new Error(error.message);
+  }
+
   if (!data) return [];
 
-  const seen = new Set<string>();
   const findings: Finding[] = [];
-  for (const row of data as ComboRow[]) {
-    const key = [row.drug_a, row.drug_b].sort().join(' + ');
+  const seen = new Set<string>();
+
+  // Match selected medication pairs against the reference dataset.
+  for (const [medA, medB] of pairs) {
+    const row = (data as ComboRow[]).find(
+      (item) =>
+        (item.drug_a.toLowerCase() === medA.toLowerCase() &&
+          item.drug_b.toLowerCase() === medB.toLowerCase()) ||
+        (item.drug_a.toLowerCase() === medB.toLowerCase() &&
+          item.drug_b.toLowerCase() === medA.toLowerCase())
+    );
+
+    if (!row) continue;
+
+    const key = [row.drug_a, row.drug_b]
+      .sort()
+      .join(' + ');
+
     if (seen.has(key)) continue;
+
     seen.add(key);
+
     const risk = severityToRisk(row.severity);
+
     findings.push({
       pair: key,
       risk,
@@ -71,12 +93,23 @@ export async function checkInteractions(medications: string[]): Promise<Finding[
       detail: row.interaction ?? '',
       mechanism: row.mechanism ?? '',
       possibleEffect: row.possible_effect ?? '',
-      advice: row.project_action ?? 'Consult a healthcare professional.',
+      advice:
+        row.project_action ??
+        'Consult a healthcare professional.',
     });
   }
+
+  // Highest risk first.
   findings.sort((a, b) => {
-    const order: Record<Risk, number> = { High: 0, Moderate: 1, Low: 2, None: 3 };
+    const order: Record<Risk, number> = {
+      High: 0,
+      Moderate: 1,
+      Low: 2,
+      None: 3,
+    };
+
     return order[a.risk] - order[b.risk];
   });
+
   return findings;
 }
